@@ -191,7 +191,8 @@ endfunction
                 // Layer1: 512 cycles
                 S_L1: begin
                     // XOR with invert flag handles negative BatchNorm gamma
-                    hidden1[idx] <= (popcount784(~(image_in ^ w1[idx])) > thresh1[idx]) ^ invert1[idx];
+                    // Use >= for threshold comparison (BNN standard)
+                    hidden1[idx] <= (popcount784(~(image_in ^ w1[idx])) >= thresh1[idx]) ^ invert1[idx];
 
                     if (idx == N_H1-1) begin
                         idx   <= 10'd0;
@@ -204,7 +205,8 @@ endfunction
                 // Layer2: 256 cycles
                 S_L2: begin
                     // XOR with invert flag handles negative BatchNorm gamma
-                    hidden2[idx] <= (popcount512(~(hidden1 ^ w2[idx])) > thresh2[idx]) ^ invert2[idx];
+                    // Use >= for threshold comparison (BNN standard)
+                    hidden2[idx] <= (popcount512(~(hidden1 ^ w2[idx])) >= thresh2[idx]) ^ invert2[idx];
 
                     if (idx == N_H2-1) begin
                         idx   <= 10'd0;
@@ -225,8 +227,9 @@ endfunction
                     end
                 end
 
-                // Argmax: 1 cycle
+                // Argmax: 1 cycle (compute argmax of out_acc[0..9])
                 S_ARGMAX: begin
+                    // Use blocking assignments for local computation within cycle
                     argmax_max = out_acc[0];
                     argmax_idx = 4'd0;
                     for (ai = 1; ai < N_CLASS; ai = ai + 1) begin
@@ -236,12 +239,13 @@ endfunction
                         end
                     end
                     digit_out <= argmax_idx;
+                    valid     <= 1'b1;  // Assert valid when result is ready
                     state     <= S_DONE;
                 end
 
-                // Done: 1 cycle pulse
+                // Done: return to idle (valid was set in S_ARGMAX)
                 S_DONE: begin
-                    valid <= 1'b1;
+                    valid <= 1'b0;  // Clear valid after one cycle
                     state <= S_IDLE;
                 end
 
