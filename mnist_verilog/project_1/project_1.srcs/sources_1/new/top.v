@@ -22,242 +22,233 @@
 
 module top (
     input  wire         clk,
-    input  wire         rst_n,
-    input  wire         start,
+    input  wire         rst_n,      // active-low synchronous reset
+    input  wire         start,      // can be 1-cycle pulse; latched internally
     input  wire [783:0] image_in,
     output reg  [3:0]   digit_out,
     output reg          valid
 );
- 
-// ?????????????????????????????????????????????????????????????????????????????
-//  Constants
-// ?????????????????????????????????????????????????????????????????????????????
-localparam N_IN    = 784;
-localparam N_H1    = 512;
-localparam N_H2    = 256;
-localparam N_CLASS = 10;
-// Accumulator width:  N_H2 * max_weight = 256 * 32767 = 8,388,352 ? 24 bits
-// Add 1 bit for bias and sign ? 25 bits signed
-localparam ACC_W   = 25;
- 
-// ?????????????????????????????????????????????????????????????????????????????
-//  State encoding
-// ?????????????????????????????????????????????????????????????????????????????
-localparam [2:0]
-    S_IDLE   = 3'd0,
-    S_LAYER1 = 3'd1,
-    S_LAYER2 = 3'd2,
-    S_OUTPUT = 3'd3,
-    S_ARGMAX = 3'd4,
-    S_DONE   = 3'd5;
- 
-reg [2:0]  state;
-reg [9:0]  neuron_idx;   // max value needed = 511 (10 bits)
- 
-// ?????????????????????????????????????????????????????????????????????????????
-//  Weight & threshold ROMs
-// ?????????????????????????????????????????????????????????????????????????????
-reg [N_IN-1:0]    w1      [0:N_H1-1];         // 512 × 784  binary weights
-reg [N_H1-1:0]    w2      [0:N_H2-1];         // 256 × 512  binary weights
-reg [9:0]         thresh1 [0:N_H1-1];          // 512 BN-folded thresholds
-reg [9:0]         thresh2 [0:N_H2-1];          // 256 BN-folded thresholds
- 
-// Output layer: Q8.8 signed weights, flat layout: index = neuron*N_H2 + j
-reg signed [15:0] w_out [0:N_CLASS*N_H2-1];   // 2560 × 16-bit
-reg signed [15:0] b_out [0:N_CLASS-1];         //   10 × 16-bit biases
- 
-initial begin
-    $readmemb("mem_files/weights_l1.mem",  w1);
-    $readmemb("mem_files/weights_l2.mem",  w2);
-    $readmemb("mem_files/thresh_l1.mem",   thresh1);
-    $readmemb("mem_files/thresh_l2.mem",   thresh2);
-    $readmemh("mem_files/weights_out.mem", w_out);
-    $readmemh("mem_files/bias_out.mem",    b_out);
-end
- 
-// ?????????????????????????????????????????????????????????????????????????????
-//  Data registers
-// ?????????????????????????????????????????????????????????????????????????????
-reg [N_H1-1:0]          hidden1;                   // 512-bit layer-1 output
-reg [N_H2-1:0]          hidden2;                   // 256-bit layer-2 output
-reg signed [ACC_W-1:0]  out_acc [0:N_CLASS-1];     // 10 output accumulators
- 
-// Argmax workspace (module-level so they are visible in waveform)
-reg [3:0]               argmax_idx;
-reg signed [ACC_W-1:0]  argmax_max;
-integer                 ai;
- 
-// ?????????????????????????????????????????????????????????????????????????????
-//  Popcount functions  (for-loop ? combinatorial adder tree in synthesis)
-// ?????????????????????????????????????????????????????????????????????????????
- 
-// XNOR popcount over 784 bits ? result in [0, 784], 10 bits wide
-function automatic [9:0] popcount784;
-    input [783:0] vec;
-    integer k;
-    reg [9:0] cnt;
-    begin                                     // function body begin [F1]
-        cnt = 10'd0;
-        for (k = 0; k < 784; k = k + 1)
-            cnt = cnt + {{9{1'b0}}, vec[k]};  // single-statement for; no begin/end
-        popcount784 = cnt;
-    end                                       // function body end [F1]
-endfunction
- 
-// XNOR popcount over 512 bits ? result in [0, 512], 10 bits wide
-function automatic [9:0] popcount512;
-    input [511:0] vec;
-    integer k;
-    reg [9:0] cnt;
-    begin                                     // function body begin [F2]
-        cnt = 10'd0;
-        for (k = 0; k < 512; k = k + 1)
-            cnt = cnt + {{9{1'b0}}, vec[k]};  // single-statement for; no begin/end
-        popcount512 = cnt;
-    end                                       // function body end [F2]
-endfunction
- 
-// ?????????????????????????????????????????????????????????????????????????????
-//  Masked-sum Q8.8 accumulator for the output layer
-//
-//  Because hidden2 is binary {0,1}, the dot product simplifies to:
-//    acc = bias + ? w_out[neuron*N_H2 + j]  for all j where hidden2[j] == 1
-//  No multiplier needed - just a conditional 16-bit adder.
-// ?????????????????????????????????????????????????????????????????????????????
-function automatic signed [ACC_W-1:0] masked_sum;
-    input [255:0]       hidden;
-    input [3:0]         neuron;      // 0 .. 9
-    input signed [15:0] bias;
+
+    // -------------------------------------------------------------------------
+    // Constants
+    // -------------------------------------------------------------------------
+    localparam integer N_IN    = 784;
+    localparam integer N_H1    = 512;
+    localparam integer N_H2    = 256;
+    localparam integer N_CLASS = 10;
+
+    // accumulator width: bias(16) + sum of up to 256 weights(16) => ~25 bits safe
+    localparam integer ACC_W   = 25;
+
+    // FSM states
+    localparam [2:0]
+        S_IDLE   = 3'd0,
+        S_L1     = 3'd1,
+        S_L2     = 3'd2,
+        S_OUT    = 3'd3,
+        S_ARGMAX = 3'd4,
+        S_DONE   = 3'd5;
+
+    reg [2:0] state;
+
+    // Start latch so we cannot miss a narrow pulse
+    reg start_latched;
+
+    // Indices
+    reg [9:0] idx; // used for L1 (0..511), L2 (0..255), OUT (0..9)
+
+    // -------------------------------------------------------------------------
+    // Memory path
+    // Change this if xsim can't find mem_files/ (e.g., set to "" to read from cwd)
+    // -------------------------------------------------------------------------
+    localparam [8*10-1:0] MEM_DIR = "mem_files/"; // "mem_files/" or ""
+
+    // -------------------------------------------------------------------------
+    // Weight & threshold ROMs
+    // -------------------------------------------------------------------------
+    reg [N_IN-1:0] w1      [0:N_H1-1];  // 512 x 784 (binary)
+    reg [N_H1-1:0] w2      [0:N_H2-1];  // 256 x 512 (binary)
+    reg [9:0]      thresh1 [0:N_H1-1];
+    reg [9:0]      thresh2 [0:N_H2-1];
+
+    // Invert flags for handling negative BatchNorm gamma
+    reg            invert1 [0:N_H1-1];
+    reg            invert2 [0:N_H2-1];
+
+    // Output layer weights/bias
+    // Flattened: w_out[cls*256 + j]
+    reg signed [15:0] w_out [0:N_CLASS*N_H2-1]; // 2560 entries
+    reg signed [15:0] b_out [0:N_CLASS-1];      // 10 entries
+
+    initial begin
+        // NOTE: if MEM_DIR is "mem_files/", Vivado must make that folder visible in xsim run dir.
+        $readmemb({MEM_DIR,"weights_l1.mem"},  w1);
+        $readmemb({MEM_DIR,"thresh_l1.mem"},   thresh1);
+        $readmemb({MEM_DIR,"invert_l1.mem"},   invert1);
+        $readmemb({MEM_DIR,"weights_l2.mem"},  w2);
+        $readmemb({MEM_DIR,"thresh_l2.mem"},   thresh2);
+        $readmemb({MEM_DIR,"invert_l2.mem"},   invert2);
+
+        $readmemh({MEM_DIR,"weights_out.mem"}, w_out);
+        $readmemh({MEM_DIR,"bias_out.mem"},    b_out);
+    end
+
+    // -------------------------------------------------------------------------
+    // Data regs
+    // -------------------------------------------------------------------------
+    reg [N_H1-1:0] hidden1;
+    reg [N_H2-1:0] hidden2;
+
+    reg signed [ACC_W-1:0] out_acc [0:N_CLASS-1];
+
+    // Argmax work regs
+    reg [3:0]              argmax_idx;
+    reg signed [ACC_W-1:0] argmax_max;
+    integer                ai;
+
+    // -------------------------------------------------------------------------
+    // Popcount
+    // -------------------------------------------------------------------------
+    function [9:0] popcount784;
+        input [N_IN-1:0] vec;
+        integer k;
+        reg [9:0] cnt;
+        begin
+            cnt = 10'd0;
+            for (k = 0; k < N_IN; k = k + 1)
+                cnt = cnt + vec[k];
+            popcount784 = cnt;
+        end
+    endfunction
+
+    function [9:0] popcount512;
+        input [N_H1-1:0] vec;
+        integer k;
+        reg [9:0] cnt;
+        begin
+            cnt = 10'd0;
+            for (k = 0; k < N_H1; k = k + 1)
+                cnt = cnt + vec[k];
+            popcount512 = cnt;
+        end
+    endfunction
+
+    // masked sum for output layer (binary hidden2)
+    function automatic signed [ACC_W-1:0] masked_sum;
+    input [255:0]       hidden;     // 1-bit encoding: 1 => +1, 0 => -1
+    input [3:0]         neuron;      // class 0..9
+    input signed [15:0] bias;        // Q8.8 scaled by 256
     integer j, base;
     reg signed [ACC_W-1:0] acc;
-    begin                                             // function body begin [F3]
-        acc  = {{(ACC_W-16){bias[15]}}, bias};        // sign-extend bias to ACC_W
+    reg signed [ACC_W-1:0] wext;
+    begin
+        acc  = {{(ACC_W-16){bias[15]}}, bias};
         base = neuron * 256;
-        for (j = 0; j < 256; j = j + 1) begin        // for loop begin [F3a]
-            if (hidden[j])                            // single-statement if; no begin
-                acc = acc + {{(ACC_W-16){w_out[base+j][15]}}, w_out[base+j]};
-        end                                           // for loop end [F3a]
+
+        for (j = 0; j < 256; j = j + 1) begin
+            wext = {{(ACC_W-16){w_out[base+j][15]}}, w_out[base+j]};
+
+            // hidden bit encodes +/-1
+            if (hidden[j])
+                acc = acc + wext;   // +1 * w
+            else
+                acc = acc - wext;   // -1 * w
+        end
+
         masked_sum = acc;
-    end                                               // function body end [F3]
+    end
 endfunction
- 
-// ?????????????????????????????????????????????????????????????????????????????
-//  Main state machine
-//
-//  begin/end inventory (sequential always block only):
-//    A1  always body
-//    A2  if (!rst_n) true-branch
-//    A3  else-branch
-//    A4  S_IDLE case-item
-//    A5  S_IDLE: if (start) true-branch
-//    A6  S_LAYER1 case-item
-//    A7  S_LAYER1: if true-branch
-//    A8  S_LAYER1: else-branch
-//    A9  S_LAYER2 case-item
-//    A10 S_LAYER2: if true-branch
-//    A11 S_LAYER2: else-branch
-//    A12 S_OUTPUT case-item
-//    A13 S_OUTPUT: if true-branch
-//    A14 S_OUTPUT: else-branch
-//    A15 S_ARGMAX case-item
-//    A16 S_ARGMAX: for loop body
-//    A17 S_ARGMAX: for-if true-branch
-//    A18 S_DONE case-item
-//  Total: 18 begins, 18 ends.
-//  Grand total with functions: 18 + 4 (F1,F2,F3,F3a) = 22 begin/end pairs.
-// ?????????????????????????????????????????????????????????????????????????????
-always @(posedge clk) begin                                          // [A1
-    if (!rst_n) begin                                                // [A2
-        state      <= S_IDLE;
-        valid      <= 1'b0;
-        digit_out  <= 4'd0;
-        neuron_idx <= 10'd0;
-        hidden1    <= {N_H1{1'b0}};
-        hidden2    <= {N_H2{1'b0}};
-    end else begin                                                   // A2] [A3
-        valid <= 1'b0;   // default; only S_DONE overrides this
- 
-        case (state)
- 
-            // ?? Idle: wait for start pulse ?????????????????????????????????
-            S_IDLE: begin                                            // [A4
-                if (start) begin                                     // [A5
-                    neuron_idx <= 10'd0;
-                    state      <= S_LAYER1;
-                end                                                  // A5]
-            end                                                      // A4]
- 
-            // ?? Layer 1: 512 BNN neurons, one per clock ????????????????????
-            // XNOR the 784-bit image with each weight row, popcount,
-            // compare with BN-folded threshold ? 1-bit neuron output.
-            S_LAYER1: begin                                          // [A6
-                hidden1[neuron_idx] <=
-                    (popcount784(~(image_in ^ w1[neuron_idx]))
-                     > thresh1[neuron_idx]) ? 1'b1 : 1'b0;
- 
-                if (neuron_idx == N_H1 - 1) begin                   // [A7
-                    neuron_idx <= 10'd0;
-                    state      <= S_LAYER2;
-                end else begin                                       // A7] [A8
-                    neuron_idx <= neuron_idx + 10'd1;
-                end                                                  // A8]
-            end                                                      // A6]
- 
-            // ?? Layer 2: 256 BNN neurons, one per clock ????????????????????
-            S_LAYER2: begin                                          // [A9
-                hidden2[neuron_idx] <=
-                    (popcount512(~(hidden1 ^ w2[neuron_idx]))
-                     > thresh2[neuron_idx]) ? 1'b1 : 1'b0;
- 
-                if (neuron_idx == N_H2 - 1) begin                   // [A10
-                    neuron_idx <= 10'd0;
-                    state      <= S_OUTPUT;
-                end else begin                                       // A10] [A11
-                    neuron_idx <= neuron_idx + 10'd1;
-                end                                                  // A11]
-            end                                                      // A9]
- 
-            // ?? Output: 10 Q8.8 accumulators, one per clock ????????????????
-            // masked_sum() computes bias + ?(w where hidden=1) for one neuron.
-            S_OUTPUT: begin                                          // [A12
-                out_acc[neuron_idx[3:0]] <=
-                    masked_sum(hidden2,
-                               neuron_idx[3:0],
-                               b_out[neuron_idx[3:0]]);
- 
-                if (neuron_idx == N_CLASS - 1) begin                // [A13
-                    state <= S_ARGMAX;
-                end else begin                                       // A13] [A14
-                    neuron_idx <= neuron_idx + 10'd1;
-                end                                                  // A14]
-            end                                                      // A12]
- 
-            // ?? Argmax: find which of 10 accumulators is highest ???????????
-            // Blocking assignments execute combinatorially in this one clock
-            // cycle; result is then stored non-blocking into digit_out.
-            S_ARGMAX: begin                                          // [A15
-                argmax_max = out_acc[0];
-                argmax_idx = 4'd0;
-                for (ai = 1; ai < N_CLASS; ai = ai + 1) begin      // [A16
-                    if (out_acc[ai] > argmax_max) begin             // [A17
-                        argmax_max = out_acc[ai];
-                        argmax_idx = ai[3:0];
-                    end                                             // A17]
-                end                                                 // A16]
-                digit_out <= argmax_idx;   // e.g. 4'b0010 for digit 2
-                state     <= S_DONE;
-            end                                                      // A15]
- 
-            // ?? Done: assert valid for one cycle ???????????????????????????
-            S_DONE: begin                                            // [A18
-                valid <= 1'b1;
-                state <= S_IDLE;
-            end                                                      // A18]
- 
-            default: state <= S_IDLE;
- 
-        endcase
-    end                                                              // A3]
-end                                                                  // A1]
- 
+
+    // -------------------------------------------------------------------------
+    // Main sequential logic
+    // -------------------------------------------------------------------------
+    always @(posedge clk) begin
+        if (!rst_n) begin
+            state         <= S_IDLE;
+            valid         <= 1'b0;
+            digit_out     <= 4'd0;
+            idx           <= 10'd0;
+            hidden1       <= {N_H1{1'b0}};
+            hidden2       <= {N_H2{1'b0}};
+            start_latched <= 1'b0;
+        end else begin
+            valid <= 1'b0;
+
+            // latch start (can't be missed)
+            if (start)
+                start_latched <= 1'b1;
+
+            case (state)
+
+                S_IDLE: begin
+                    if (start_latched) begin
+                        start_latched <= 1'b0;
+                        idx           <= 10'd0;
+                        state         <= S_L1;
+                    end
+                end
+
+                // Layer1: 512 cycles
+                S_L1: begin
+                    // XOR with invert flag handles negative BatchNorm gamma
+                    hidden1[idx] <= (popcount784(~(image_in ^ w1[idx])) > thresh1[idx]) ^ invert1[idx];
+
+                    if (idx == N_H1-1) begin
+                        idx   <= 10'd0;
+                        state <= S_L2;
+                    end else begin
+                        idx <= idx + 10'd1;
+                    end
+                end
+
+                // Layer2: 256 cycles
+                S_L2: begin
+                    // XOR with invert flag handles negative BatchNorm gamma
+                    hidden2[idx] <= (popcount512(~(hidden1 ^ w2[idx])) > thresh2[idx]) ^ invert2[idx];
+
+                    if (idx == N_H2-1) begin
+                        idx   <= 10'd0;
+                        state <= S_OUT;
+                    end else begin
+                        idx <= idx + 10'd1;
+                    end
+                end
+
+                // Output: 10 cycles
+                S_OUT: begin
+                    out_acc[idx[3:0]] <= masked_sum(hidden2, idx[3:0], b_out[idx[3:0]]);
+
+                    if (idx == N_CLASS-1) begin
+                        state <= S_ARGMAX;
+                    end else begin
+                        idx <= idx + 10'd1;
+                    end
+                end
+
+                // Argmax: 1 cycle
+                S_ARGMAX: begin
+                    argmax_max = out_acc[0];
+                    argmax_idx = 4'd0;
+                    for (ai = 1; ai < N_CLASS; ai = ai + 1) begin
+                        if (out_acc[ai] > argmax_max) begin
+                            argmax_max = out_acc[ai];
+                            argmax_idx = ai[3:0];
+                        end
+                    end
+                    digit_out <= argmax_idx;
+                    state     <= S_DONE;
+                end
+
+                // Done: 1 cycle pulse
+                S_DONE: begin
+                    valid <= 1'b1;
+                    state <= S_IDLE;
+                end
+
+                default: state <= S_IDLE;
+
+            endcase
+        end
+    end
+
 endmodule

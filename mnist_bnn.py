@@ -69,7 +69,7 @@ class BinarySignSTE(torch.autograd.Function):
     def forward(ctx, x):
         ctx.save_for_backward(x)
         return x.sign()
-
+    
     @staticmethod
     def backward(ctx, grad):
         (x,) = ctx.saved_tensors
@@ -208,6 +208,20 @@ if __name__ == '__main__':
     model.load_state_dict(torch.load("bnn_best.pt", map_location=device))
     model.eval()
 
+    # ── Verify BatchNorm gamma signs ──────────────────────────────────────────
+    with torch.no_grad():
+        gamma1_check = model.l1.bn.weight.cpu().numpy()
+        gamma2_check = model.l2.bn.weight.cpu().numpy()
+        neg_g1 = (gamma1_check < 0).sum()
+        neg_g2 = (gamma2_check < 0).sum()
+        print(f"\nBatchNorm gamma analysis:")
+        print(f"  Layer 1: {neg_g1}/{len(gamma1_check)} negative gammas")
+        print(f"  Layer 2: {neg_g2}/{len(gamma2_check)} negative gammas")
+        if neg_g1 > 0 or neg_g2 > 0:
+            print("  → Invert flags will be exported for Verilog")
+        else:
+            print("  → All gammas positive (invert flags will be all zeros)")
+
     # ─────────────────────────────────────────────────────────────────────────
     #  Export weights to .mem files
     #  The 4-bit binary encoding is ONLY used here for the Verilog design.
@@ -229,8 +243,16 @@ if __name__ == '__main__':
         mean1   = model.l1.bn.running_mean.cpu().numpy()
         var1    = model.l1.bn.running_var.cpu().numpy()
         std1    = np.sqrt(var1 + 1e-5)
-        adj_mu1 = mean1 - beta1 * std1 / (gamma1 + 1e-8)
+
+        # FIX: Handle negative gamma correctly
+        # Use sign-preserving safe division to avoid issues near zero
+        gamma1_safe = np.sign(gamma1) * np.maximum(np.abs(gamma1), 1e-8)
+        adj_mu1 = mean1 - beta1 * std1 / gamma1_safe
         thresh1 = np.clip(np.round((N_INPUT + adj_mu1) / 2).astype(int), 0, N_INPUT)
+
+        # Invert bit: when gamma < 0, the comparison direction flips
+        # Verilog will XOR the comparison result with this bit
+        invert1 = (gamma1 < 0).astype(np.int32)
 
         w2_bin  = ((bsign(model.l2.weight) + 1) // 2).int().cpu().numpy()
 
@@ -239,8 +261,14 @@ if __name__ == '__main__':
         mean2   = model.l2.bn.running_mean.cpu().numpy()
         var2    = model.l2.bn.running_var.cpu().numpy()
         std2    = np.sqrt(var2 + 1e-5)
-        adj_mu2 = mean2 - beta2 * std2 / (gamma2 + 1e-8)
+
+        # FIX: Handle negative gamma correctly for layer 2
+        gamma2_safe = np.sign(gamma2) * np.maximum(np.abs(gamma2), 1e-8)
+        adj_mu2 = mean2 - beta2 * std2 / gamma2_safe
         thresh2 = np.clip(np.round((N_H1 + adj_mu2) / 2).astype(int), 0, N_H1)
+
+        # Invert bit for layer 2
+        invert2 = (gamma2 < 0).astype(np.int32)
 
         w_out   = model.fc_out.weight.cpu().numpy()
         b_out   = model.fc_out.bias.cpu().numpy()
@@ -262,6 +290,15 @@ if __name__ == '__main__':
     with open(os.path.join(OUT_DIR, "thresh_l2.mem"), "w") as f:
         for t in thresh2:
             f.write(format(int(np.clip(t, 0, 1023)), "010b") + "\n")
+
+    # Export invert flags for handling negative gamma
+    with open(os.path.join(OUT_DIR, "invert_l1.mem"), "w") as f:
+        for inv in invert1:
+            f.write(f"{inv}\n")
+
+    with open(os.path.join(OUT_DIR, "invert_l2.mem"), "w") as f:
+        for inv in invert2:
+            f.write(f"{inv}\n")
 
     SCALE = 256
     w_out_fx = np.clip(np.round(w_out * SCALE).astype(int), -32768, 32767)
@@ -309,10 +346,18 @@ if __name__ == '__main__':
 
             print(f"  {digit:>5}  {exp_bits:>13}  {got_bits:>8}  {pred:>4}  {status}")
 
-            # Save binarised pixel image for Verilog testbench
-            img_bin = (raw_img.view(-1) > 0.5).int().numpy()
-            with open(f"{OUT_DIR}/test_image_{digit}.mem", "w") as f:
-                f.write("".join(map(str, img_bin)) + "\n")
+            mean = 0.1307
+            std  = 0.3081
+
+            raw_flat = raw_img.view(-1).cpu().numpy()               # float32 in [0,1]
+            norm_flat = (raw_flat - mean) / std
+
+# Convert bipolar sign() to {0,1} bits:
+# +1 => 1, -1 => 0
+            img_bin = (norm_flat >= 0.0).astype(np.int32)
+
+            with open(os.path.join(OUT_DIR, f"test_image_{digit}.mem"), "w") as f:
+                f.write("".join(map(str, img_bin.tolist())) + "\n")
 
     print(f"\n  All test images saved to {OUT_DIR}/test_image_N.mem")
     print("\n" + "=" * 52)
