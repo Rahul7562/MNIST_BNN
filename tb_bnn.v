@@ -6,6 +6,7 @@
 //
 //  Change TEST_DIGIT to 0–9 to test different images.
 //  Simulated output for digit 2 should be:  digit_out = 4'b0010
+//  Current architecture: 784 -> 512 -> 256 -> 10 -> argmax -> 4-bit
 //
 //  Simulate with:
 //    iverilog -o bnn_sim bnn_top.v tb_bnn.v && vvp bnn_sim
@@ -82,6 +83,7 @@ endtask
 // ─────────────────────────────────────────────────────────────────────────────
 //  Stimulus
 // ─────────────────────────────────────────────────────────────────────────────
+localparam integer TIMEOUT_CYCLES = 2000;
 integer timeout_cnt;
 
 initial begin
@@ -116,12 +118,12 @@ initial begin
 
     // Wait for valid with timeout
     timeout_cnt = 0;
-    while (!valid && timeout_cnt < 500) begin
+    while (!valid && timeout_cnt < TIMEOUT_CYCLES) begin
         @(posedge clk); #1;
         timeout_cnt = timeout_cnt + 1;
     end
 
-    if (timeout_cnt >= 500) begin
+    if (timeout_cnt >= TIMEOUT_CYCLES) begin
         $display("  ERROR: Timeout waiting for valid signal!");
         $finish;
     end
