@@ -1,0 +1,30 @@
+Time resolution is 1 ps
+===========================================
+BNN MNIST Classifier Simulation
+Testing digit: 2
+===========================================
+Image loaded: 142 active pixels out of 784
+Reset released at time 45000
+Starting inference at time 65000
+  Processing... cycle 200, state=1
+  Processing... cycle 400, state=1
+  Processing... cycle 600, state=2
+Inference completed in 778 cycles
+-------------------------------------------
+Expected digit (image_id) = 2
+Predicted digit_out       = 3
+-------------------------------------------
+Output layer scores:
+  Class 0: -1785
+  Class 1: -682
+  Class 2: -1301
+  Class 3: 2551
+  Class 4: -2005
+  Class 5: 2435
+  Class 6: -1663
+  Class 7: 1600
+  Class 8: 261
+  Class 9: -282
+-------------------------------------------
+RESULT: FAIL
+$finish called at time : 7985 ns : File "D:/Rahul/Projects/MNIST_BNN/mnist_verilog/project_1/project_1.srcs/sim_1/new/tb.v" Line 178
