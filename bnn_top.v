@@ -33,6 +33,8 @@ localparam N_IN    = 784;
 localparam N_H1    = 512;
 localparam N_H2    = 256;
 localparam N_CLASS = 10;
+// Worst-case magnitude is about 256*32767 + 32767 = 8,421,119, so ACC_W=25
+// (signed range ±16,777,216) provides safe headroom.
 localparam ACC_W   = 25;
 
 localparam [2:0]
@@ -45,6 +47,8 @@ localparam [2:0]
 
 reg [2:0]  state;
 reg [9:0]  neuron_idx;
+// Used only in S_OUTPUT where FSM constrains neuron_idx to 0..N_CLASS-1 (0..9),
+// so truncation to 4 bits is safe for class indexing.
 wire [3:0] class_idx = neuron_idx[3:0];
 
 reg [N_IN-1:0]    w1      [0:N_H1-1];
@@ -97,21 +101,34 @@ function automatic [9:0] popcount512;
 endfunction
 
 function automatic signed [ACC_W-1:0] masked_sum;
-    input [255:0]       hidden;
+    // Computes one output-class score:
+    //   bias + sum(w_out[j]) for every active hidden bit hidden[j]==1.
+    input [N_H2-1:0]    hidden;
     input [3:0]         neuron;
     input signed [15:0] bias;
     integer j, base;
     reg signed [ACC_W-1:0] acc;
     begin
         acc  = {{(ACC_W-16){bias[15]}}, bias};
-        base = neuron * 256;
-        for (j = 0; j < 256; j = j + 1) begin
+        base = neuron * N_H2;
+        for (j = 0; j < N_H2; j = j + 1) begin
             if (hidden[j])
                 acc = acc + {{(ACC_W-16){w_out[base+j][15]}}, w_out[base+j]};
         end
         masked_sum = acc;
     end
 endfunction
+
+always @(*) begin
+    argmax_max = out_acc[0];
+    argmax_idx = 4'd0;
+    for (ai = 1; ai < N_CLASS; ai = ai + 1) begin
+        if (out_acc[ai] > argmax_max) begin
+            argmax_max = out_acc[ai];
+            argmax_idx = ai[3:0];
+        end
+    end
+end
 
 always @(posedge clk) begin
     if (!rst_n) begin
@@ -172,14 +189,6 @@ always @(posedge clk) begin
             end
 
             S_ARGMAX: begin
-                argmax_max = out_acc[0];
-                argmax_idx = 4'd0;
-                for (ai = 1; ai < N_CLASS; ai = ai + 1) begin
-                    if (out_acc[ai] > argmax_max) begin
-                        argmax_max = out_acc[ai];
-                        argmax_idx = ai[3:0];
-                    end
-                end
                 digit_out <= argmax_idx;
                 state     <= S_DONE;
             end
