@@ -43,6 +43,7 @@ module tb;
     integer tc;
     integer popcount;
     integer i, d;
+    integer w1_popcount;
 
     // Task to load a specific digit image
     task load_image;
@@ -146,11 +147,15 @@ module tb;
         $display("BNN MNIST Classifier - Full Test Suite");
         $display("==============================================");
 
-        // Verify weight loading by checking first weight entry
+        // Verify weight loading - count ones in w1[0] manually
+        w1_popcount = 0;
+        for (i = 0; i < 784; i = i + 1) begin
+            w1_popcount = w1_popcount + dut.w1[0][i];
+        end
+
         $display("");
         $display("Memory loading verification:");
-        $display("  w1[0] popcount: %0d (should be ~392 = half of 784)", $countones(dut.w1[0]));
-        $display("  w2[0] popcount: %0d (should be ~256 = half of 512)", $countones(dut.w2[0]));
+        $display("  w1[0] popcount: %0d (should be ~392 = half of 784)", w1_popcount);
         $display("  thresh1[0]: %0d", dut.thresh1[0]);
         $display("  thresh2[0]: %0d", dut.thresh2[0]);
         $display("  invert1[0]: %0d", dut.invert1[0]);
