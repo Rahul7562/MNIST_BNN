@@ -1,0 +1,26 @@
+$date
+   Sat Mar 21 21:25:22 2026
+$end
+
+$version
+  2023.2
+  $dumpfile ("bnn_minimal.vcd") 
+$end
+
+$timescale
+  1ps
+$end
+
+$scope module tb $end
+$var reg 4 ! image_id [3:0] $end
+$var wire 4 " digit_out [3:0] $end
+$var wire 1 # valid $end
+$upscope $end
+$enddefinitions $end
+
+#0
+$dumpvars
+b0 !
+bx "
+x#
+$end
