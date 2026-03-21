@@ -1,166 +1,198 @@
-// =============================================================================
-//  bnn_top.v  –  Binary Neural Network Inference  (784 → 64 → 4)
-// =============================================================================
-//  Input   : 784-bit binarised 28×28 image (pixel > 127 → 1, else 0)
-//  Output  : 4-bit digit prediction  (digit 2 → digit_out = 4'b0010)
-//
-//  Operation (sequential, one neuron per clock):
-//    State LAYER1 : compute 64 hidden neurons using XNOR + popcount + thresh
-//    State LAYER2 : compute 4  output bits  using XNOR + popcount (thresh=32)
-//    State DONE   : assert valid, hold digit_out
-//
-//  Total latency : 64 + 4 + 2 = 70 clock cycles after start is asserted
-//
-//  mem_files needed (place next to this file, or update paths below):
-//    mem_files/weights_l1.mem   – 64 lines × 784 binary chars
-//    mem_files/weights_l2.mem   –  4 lines ×  64 binary chars
-//    mem_files/thresh_l1.mem    – 64 lines × 10-bit binary integers
-// =============================================================================
-
 `timescale 1ns / 1ps
+//////////////////////////////////////////////////////////////////////////////////
+// Company:
+// Engineer:
+//
+// Create Date: 20.03.2026 17:02:58
+// Design Name:
+// Module Name: bnn_top
+// Project Name:
+// Target Devices:
+// Tool Versions:
+// Description:
+//
+// Dependencies:
+//
+// Revision:
+// Revision 0.01 - File Created
+// Additional Comments:
+//
+//////////////////////////////////////////////////////////////////////////////////
+
 
 module bnn_top (
-    input  wire         clk,          // system clock
-    input  wire         rst_n,        // active-low sync reset
-    input  wire         start,        // pulse high 1 cycle to begin inference
-    input  wire [783:0] image_in,     // binarised pixels, MSB = pixel[0,0]
-    output reg  [3:0]   digit_out,    // 4-bit predicted digit (0–9)
-    output reg          valid         // high for 1 cycle when digit_out is ready
+    input  wire         clk,
+    input  wire         rst_n,
+    input  wire         start,
+    input  wire [783:0] image_in,
+    output reg  [3:0]   digit_out,
+    output reg          valid
 );
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Parameters
-// ─────────────────────────────────────────────────────────────────────────────
-localparam N_INPUT  = 784;
-localparam N_HIDDEN = 64;
-localparam N_OUT    = 4;
-localparam THRESH2  = 7'd32;    // N_HIDDEN/2 – layer-2 threshold (no BN)
+localparam N_IN    = 784;
+localparam N_H1    = 512;
+localparam N_H2    = 256;
+localparam N_CLASS = 10;
+// Worst-case magnitude is about 256*32767 + 32767 = 8,421,119, so ACC_W=25
+// (signed range ±16,777,216) provides safe headroom.
+localparam ACC_W   = 25;
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Weight & threshold memories  (initialised from .mem files)
-// ─────────────────────────────────────────────────────────────────────────────
-// synthesis translate_off
-// (For FPGA synthesis, replace with BRAM primitives or IP block for large ROMs)
-// synthesis translate_on
+localparam [2:0]
+    S_IDLE   = 3'd0,
+    S_LAYER1 = 3'd1,
+    S_LAYER2 = 3'd2,
+    S_OUTPUT = 3'd3,
+    S_ARGMAX = 3'd4,
+    S_DONE   = 3'd5;
 
-reg [N_INPUT-1:0]  w1      [0:N_HIDDEN-1];  // 64 × 784
-reg [N_HIDDEN-1:0] w2      [0:N_OUT-1];     //  4 ×  64
-reg [9:0]          thresh1 [0:N_HIDDEN-1];  // 64 thresholds (0–784)
+reg [2:0]  state;
+reg [9:0]  neuron_idx;
+// Used only in S_OUTPUT where FSM constrains neuron_idx to 0..N_CLASS-1 (0..9),
+// so truncation to 4 bits is safe for class indexing.
+wire [3:0] class_idx = neuron_idx[3:0];
+
+reg [N_IN-1:0]    w1      [0:N_H1-1];
+reg [N_H1-1:0]    w2      [0:N_H2-1];
+reg [9:0]         thresh1 [0:N_H1-1];
+reg [9:0]         thresh2 [0:N_H2-1];
+
+reg signed [15:0] w_out [0:N_CLASS*N_H2-1];
+reg signed [15:0] b_out [0:N_CLASS-1];
 
 initial begin
-    $readmemb("mem_files/weights_l1.mem", w1);
-    $readmemb("mem_files/weights_l2.mem", w2);
-    $readmemb("mem_files/thresh_l1.mem",  thresh1);
+    $readmemb("mem_files/weights_l1.mem",  w1);
+    $readmemb("mem_files/weights_l2.mem",  w2);
+    $readmemb("mem_files/thresh_l1.mem",   thresh1);
+    $readmemb("mem_files/thresh_l2.mem",   thresh2);
+    $readmemh("mem_files/weights_out.mem", w_out);
+    $readmemh("mem_files/bias_out.mem",    b_out);
 end
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Internal registers
-// ─────────────────────────────────────────────────────────────────────────────
-reg [N_HIDDEN-1:0] hidden;          // binary hidden layer result
-reg [6:0]          neuron_idx;      // current neuron being computed
+reg [N_H1-1:0]          hidden1;
+reg [N_H2-1:0]          hidden2;
+reg signed [ACC_W-1:0]  out_acc [0:N_CLASS-1];
 
-// Popcount accumulators
-reg [9:0] pc1;      // 0–784  (10 bits)
-reg [6:0] pc2;      // 0– 64  ( 7 bits)
+reg [3:0]               argmax_idx;
+reg signed [ACC_W-1:0]  argmax_max;
+integer                 ai;
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  State machine
-// ─────────────────────────────────────────────────────────────────────────────
-localparam [1:0]
-    S_IDLE   = 2'd0,
-    S_LAYER1 = 2'd1,
-    S_LAYER2 = 2'd2,
-    S_DONE   = 2'd3;
-
-reg [1:0] state;
-
-// ─────────────────────────────────────────────────────────────────────────────
-//  Popcount helpers
-//  These for-loop implementations synthesise to adder trees in all major tools.
-// ─────────────────────────────────────────────────────────────────────────────
 function automatic [9:0] popcount784;
-    input [N_INPUT-1:0] vec;
+    input [783:0] vec;
     integer k;
     reg [9:0] cnt;
     begin
         cnt = 10'd0;
-        for (k = 0; k < N_INPUT; k = k + 1)
+        for (k = 0; k < 784; k = k + 1)
             cnt = cnt + {{9{1'b0}}, vec[k]};
         popcount784 = cnt;
     end
 endfunction
 
-function automatic [6:0] popcount64;
-    input [N_HIDDEN-1:0] vec;
+function automatic [9:0] popcount512;
+    input [511:0] vec;
     integer k;
-    reg [6:0] cnt;
+    reg [9:0] cnt;
     begin
-        cnt = 7'd0;
-        for (k = 0; k < N_HIDDEN; k = k + 1)
-            cnt = cnt + {{6{1'b0}}, vec[k]};
-        popcount64 = cnt;
+        cnt = 10'd0;
+        for (k = 0; k < 512; k = k + 1)
+            cnt = cnt + {{9{1'b0}}, vec[k]};
+        popcount512 = cnt;
     end
 endfunction
 
-// ─────────────────────────────────────────────────────────────────────────────
-//  Main sequential logic
-// ─────────────────────────────────────────────────────────────────────────────
+function automatic signed [ACC_W-1:0] masked_sum;
+    // Computes one output-class score:
+    //   bias + sum(w_out[j]) for every active hidden bit hidden[j]==1.
+    input [N_H2-1:0]    hidden;
+    input [3:0]         neuron;
+    input signed [15:0] bias;
+    integer j, base;
+    reg signed [ACC_W-1:0] acc;
+    begin
+        acc  = {{(ACC_W-16){bias[15]}}, bias};
+        base = neuron * N_H2;
+        for (j = 0; j < N_H2; j = j + 1) begin
+            if (hidden[j])
+                acc = acc + {{(ACC_W-16){w_out[base+j][15]}}, w_out[base+j]};
+        end
+        masked_sum = acc;
+    end
+endfunction
+
+always @(*) begin
+    argmax_max = out_acc[0];
+    argmax_idx = 4'd0;
+    for (ai = 1; ai < N_CLASS; ai = ai + 1) begin
+        if (out_acc[ai] > argmax_max) begin
+            argmax_max = out_acc[ai];
+            argmax_idx = ai[3:0];
+        end
+    end
+end
+
 always @(posedge clk) begin
     if (!rst_n) begin
         state      <= S_IDLE;
-        hidden     <= {N_HIDDEN{1'b0}};
-        digit_out  <= 4'b0000;
         valid      <= 1'b0;
-        neuron_idx <= 7'd0;
-        pc1        <= 10'd0;
-        pc2        <= 7'd0;
+        digit_out  <= 4'd0;
+        neuron_idx <= 10'd0;
+        hidden1    <= {N_H1{1'b0}};
+        hidden2    <= {N_H2{1'b0}};
     end else begin
-        valid <= 1'b0;              // default: deassert valid every cycle
+        valid <= 1'b0;
 
         case (state)
-            // ── Wait for start pulse ──────────────────────────────────────────
             S_IDLE: begin
                 if (start) begin
-                    neuron_idx <= 7'd0;
+                    neuron_idx <= 10'd0;
                     state      <= S_LAYER1;
                 end
             end
 
-            // ── Layer 1: process neuron[neuron_idx] ───────────────────────────
-            // XNOR(image_in, w1[i]) counts how many weights match the pixels.
-            // In {-1,+1} maths: dot = 2·XNOR_count − N_INPUT
-            // Fire if XNOR_count > thresh1[i]  (thresh1 has BN folded in)
             S_LAYER1: begin
-                pc1 = popcount784(~(image_in ^ w1[neuron_idx]));   // XNOR
+                hidden1[neuron_idx] <=
+                    (popcount784(~(image_in ^ w1[neuron_idx]))
+                     > thresh1[neuron_idx]);
 
-                hidden[neuron_idx] <= (pc1 > thresh1[neuron_idx]) ? 1'b1 : 1'b0;
-
-                if (neuron_idx == N_HIDDEN - 1) begin
-                    neuron_idx <= 7'd0;
+                if (neuron_idx == N_H1 - 1) begin
+                    neuron_idx <= 10'd0;
                     state      <= S_LAYER2;
                 end else begin
-                    neuron_idx <= neuron_idx + 7'd1;
+                    neuron_idx <= neuron_idx + 10'd1;
                 end
             end
 
-            // ── Layer 2: process output bit[neuron_idx] ───────────────────────
-            // 4 neurons → 4 bits of the predicted digit (neuron 0 = MSB)
-            // No BN → fixed threshold = N_HIDDEN/2 = 32
             S_LAYER2: begin
-                pc2 = popcount64(~(hidden ^ w2[neuron_idx]));       // XNOR
+                hidden2[neuron_idx] <=
+                    (popcount512(~(hidden1 ^ w2[neuron_idx]))
+                     > thresh2[neuron_idx]);
 
-                // neuron 0 → digit_out[3] (MSB), neuron 3 → digit_out[0] (LSB)
-                digit_out[N_OUT - 1 - neuron_idx[1:0]] <=
-                    (pc2 > THRESH2) ? 1'b1 : 1'b0;
-
-                if (neuron_idx == N_OUT - 1) begin
-                    state <= S_DONE;
+                if (neuron_idx == N_H2 - 1) begin
+                    neuron_idx <= 10'd0;
+                    state      <= S_OUTPUT;
                 end else begin
-                    neuron_idx <= neuron_idx + 7'd1;
+                    neuron_idx <= neuron_idx + 10'd1;
                 end
             end
 
-            // ── Assert valid for one cycle, return to IDLE ────────────────────
+            S_OUTPUT: begin
+                out_acc[class_idx] <=
+                    masked_sum(hidden2,
+                               class_idx,
+                               b_out[class_idx]);
+
+                if (neuron_idx == N_CLASS - 1) begin
+                    state <= S_ARGMAX;
+                end else begin
+                    neuron_idx <= neuron_idx + 10'd1;
+                end
+            end
+
+            S_ARGMAX: begin
+                digit_out <= argmax_idx;
+                state     <= S_DONE;
+            end
+
             S_DONE: begin
                 valid <= 1'b1;
                 state <= S_IDLE;
