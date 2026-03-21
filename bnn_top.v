@@ -45,6 +45,7 @@ localparam [2:0]
 
 reg [2:0]  state;
 reg [9:0]  neuron_idx;
+wire [3:0] class_idx = neuron_idx[3:0];
 
 reg [N_IN-1:0]    w1      [0:N_H1-1];
 reg [N_H1-1:0]    w2      [0:N_H2-1];
@@ -134,7 +135,7 @@ always @(posedge clk) begin
             S_LAYER1: begin
                 hidden1[neuron_idx] <=
                     (popcount784(~(image_in ^ w1[neuron_idx]))
-                     > thresh1[neuron_idx]) ? 1'b1 : 1'b0;
+                     > thresh1[neuron_idx]);
 
                 if (neuron_idx == N_H1 - 1) begin
                     neuron_idx <= 10'd0;
@@ -147,7 +148,7 @@ always @(posedge clk) begin
             S_LAYER2: begin
                 hidden2[neuron_idx] <=
                     (popcount512(~(hidden1 ^ w2[neuron_idx]))
-                     > thresh2[neuron_idx]) ? 1'b1 : 1'b0;
+                     > thresh2[neuron_idx]);
 
                 if (neuron_idx == N_H2 - 1) begin
                     neuron_idx <= 10'd0;
@@ -158,10 +159,10 @@ always @(posedge clk) begin
             end
 
             S_OUTPUT: begin
-                out_acc[neuron_idx[3:0]] <=
+                out_acc[class_idx] <=
                     masked_sum(hidden2,
-                               neuron_idx[3:0],
-                               b_out[neuron_idx[3:0]]);
+                               class_idx,
+                               b_out[class_idx]);
 
                 if (neuron_idx == N_CLASS - 1) begin
                     state <= S_ARGMAX;
