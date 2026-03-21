@@ -22,7 +22,7 @@
 
 module tb;
 
-    parameter integer FOCUS_DIGIT = 9;
+    parameter integer FOCUS_DIGIT = 0;
     parameter integer CLK_HALF    = 5;      // 10ns period
     parameter integer TIMEOUT     = 20000;  // must be > ~800 cycles
 

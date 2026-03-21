@@ -1,5 +1,0 @@
-Time resolution is 1 ps
-Input  image_id = 1001 (9)
-Output digit_out= 0011 (3)
-FAIL
-$finish called at time : 7985 ns : File "D:/Rahul/Projects/MNIST_BNN/mnist_verilog/project_1/project_1.srcs/sim_1/new/tb.v" Line 128
