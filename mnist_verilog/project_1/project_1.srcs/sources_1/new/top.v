@@ -1,24 +1,13 @@
 `timescale 1ns / 1ps
 //////////////////////////////////////////////////////////////////////////////////
-// Company: 
-// Engineer: 
-// 
-// Create Date: 20.03.2026 17:02:58
-// Design Name: 
-// Module Name: top
-// Project Name: 
-// Target Devices: 
-// Tool Versions: 
-// Description: 
-// 
-// Dependencies: 
-// 
-// Revision:
-// Revision 0.01 - File Created
-// Additional Comments:
-// 
+// BNN MNIST Top Module (Simulation Wrapper)
+//
+// This module wraps the bnn_core for backwards compatibility with existing
+// testbenches. For FPGA implementation, use bnn_fpga_top instead.
+//
+// Architecture: 784 -> 512 (BNN) -> 256 (BNN) -> 10 (argmax)
+// Latency: ~780 cycles @ 100MHz
 //////////////////////////////////////////////////////////////////////////////////
-
 
 module top (
     input  wire         clk,
