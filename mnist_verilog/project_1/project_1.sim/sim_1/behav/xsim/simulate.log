@@ -1,0 +1,82 @@
+Time resolution is 1 ps
+
+================================================================
+BNN MNIST Classifier - Comprehensive Test Suite
+================================================================
+
+  Loaded 40 test images (4 per digit)
+
+----------------------------------------------------------------
+Test 1: BNN Core Direct Testing (40 images)
+----------------------------------------------------------------
+
+  Digit  Var  Pixels   Result   Status
+  -----  ---  ------   ------   ------
+      0    0     177        0   PASS
+      0    1     157        0   PASS
+      0    2     154        0   PASS
+      0    3     250        0   PASS
+      1    0      56        1   PASS
+      1    1      70        1   PASS
+      1    2      75        1   PASS
+      1    3      65        1   PASS
+      2    0     142        2   PASS
+      2    1     152        2   PASS
+      2    2     106        2   PASS
+      2    3      90        2   PASS
+      3    0     185        3   PASS
+      3    1     124        3   PASS
+      3    2     139        3   PASS
+      3    3      98        3   PASS
+      4    0     104        4   PASS
+      4    1     115        4   PASS
+      4    2      92        4   PASS
+      4    3      79        4   PASS
+      5    0     154        6   FAIL (expected 5)
+      5    1     124        5   PASS
+      5    2     116        5   PASS
+      5    3     119        5   PASS
+      6    0     150        6   PASS
+      6    1     119        6   PASS
+      6    2     130        6   PASS
+      6    3     108        6   PASS
+      7    0     104        7   PASS
+      7    1     119        7   PASS
+      7    2      84        7   PASS
+      7    3     133        7   PASS
+      8    0     163        8   PASS
+      8    1     152        8   PASS
+      8    2     154        8   PASS
+      8    3     189        8   PASS
+      9    0     108        9   PASS
+      9    1     157        9   PASS
+      9    2     125        9   PASS
+      9    3     121        9   PASS
+
+================================================================
+Test Summary
+================================================================
+
+  Per-Digit Accuracy:
+    Digit 0: 4 / 4 correct (100%)
+    Digit 1: 4 / 4 correct (100%)
+    Digit 2: 4 / 4 correct (100%)
+    Digit 3: 4 / 4 correct (100%)
+    Digit 4: 4 / 4 correct (100%)
+    Digit 5: 3 / 4 correct (75%)
+    Digit 6: 4 / 4 correct (100%)
+    Digit 7: 4 / 4 correct (100%)
+    Digit 8: 4 / 4 correct (100%)
+    Digit 9: 4 / 4 correct (100%)
+
+  Overall Results:
+    Total Passed: 39 / 40
+    Total Failed: 1 / 40
+    Accuracy:     97%
+    Avg Latency:  779 cycles per inference
+
+  STATUS: SUCCESS (>=90% accuracy)
+
+================================================================
+
+$finish called at time : 314345 ns : File "D:/Rahul/Projects/MNIST_BNN/mnist_verilog/project_1/project_1.srcs/sim_1/new/tb_bnn_system.v" Line 306
